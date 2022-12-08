@@ -50,7 +50,7 @@ public class Slime : MonoBehaviour
     RenderTexture drawTexture, trailTexture;
     RenderTexture trailTexture2;
 
-    ComputeBuffer actorBuffer, speciesBuffer;
+    ComputeBuffer actorBuffer, speciesBuffer, settingsBuffer;
 
     Settings currentSettings;
 
@@ -59,20 +59,20 @@ public class Slime : MonoBehaviour
     // Start is called before the first frame update
     void Start()
     {
-        Settings currentSettings = new Settings(
-            sensorSizeMin, sensorSizeMax,
-            sensorAngleMin, sensorAngleMax,
-            sensorDistanceMin, sensorDistanceMax,
-            moveSpeedMin, moveSpeedMax,
-            turnSpeedMin, turnSpeedMax
-        );
+        currentSettings = new Settings( new Vector2[] {
+            new Vector2(sensorSizeMin, sensorSizeMax),
+            new Vector2(sensorAngleMin, sensorAngleMax),
+            new Vector2(sensorDistanceMin, sensorDistanceMax),
+            new Vector2(moveSpeedMin, moveSpeedMax),
+            new Vector2(turnSpeedMin, turnSpeedMax)
+        });
 
         defaultSpecies.index = 0;
-        defaultSpecies.sensorAngle = sensorAngleMin;
-        defaultSpecies.sensorDistance = sensorDistanceMin;
-        defaultSpecies.sensorSize = sensorSizeMin;
-        defaultSpecies.turnSpeed = turnSpeedMin;
-        defaultSpecies.moveSpeed = 150f;
+        defaultSpecies.sensorAngle = 1;
+        defaultSpecies.sensorDistance = 1;
+        defaultSpecies.sensorSize = 1;
+        defaultSpecies.turnSpeed = 1;
+        defaultSpecies.moveSpeed = 1;
         defaultSpecies.color = new Vector4(1, 1, 1, 1);
         defaultSpecies.inverseColor = new Vector4(0, 0, 0, 0);
 
@@ -90,6 +90,10 @@ public class Slime : MonoBehaviour
         speciesBuffer = new ComputeBuffer(numSpecies, sizeof(int) * 2 + sizeof(float) * 12);
         species = createSpecies();
         speciesBuffer.SetData(species);
+        settingsBuffer = new ComputeBuffer(1, sizeof(float) * 10);
+        settingsBuffer.SetData(new Settings[] { currentSettings });
+        
+
 
         computeShader.SetTexture(0, "_trailTexToWrite", trailTexture);
         computeShader.SetTexture(0, "_trailTexToWrite2", trailTexture2);
@@ -106,6 +110,8 @@ public class Slime : MonoBehaviour
         computeShader.SetInt("resolution", resolution);
         computeShader.SetBuffer(0, "actors", actorBuffer);
         computeShader.SetBuffer(0, "species", speciesBuffer);
+        computeShader.SetBuffer(0, "settingsBuffer", settingsBuffer);
+
         computeShader.SetFloat("evaporateSpeed", evaporateSpeed);
 
         Renderer r = GetComponent<Renderer>();
@@ -113,25 +119,26 @@ public class Slime : MonoBehaviour
         r.material.SetTexture("_MetallicGlossMap", trailTexture2);
         r.material.SetTexture("_SmoothnessTextureChannel", trailTexture2);
 
-        computeShader.Dispatch(3, resolution / 8, resolution / 8, 1);
-
         Initialized = true;
     }
 
     // Update is called once per frame
     void Update()
     {
-        computeShader.SetFloat("deltaTime", Time.deltaTime);
-        computeShader.SetFloat("time", Time.time);
-        computeShader.Dispatch(0, numActors / 16, 1, 1);
+        if (Initialized)
+        {
+            computeShader.SetFloat("deltaTime", Time.deltaTime);
+            computeShader.SetFloat("time", Time.time);
+            computeShader.Dispatch(0, numActors / 16, 1, 1);
 
-        computeShader.Dispatch(1, resolution / 8, resolution / 8, 1);
-        computeShader.Dispatch(2, resolution / 8, resolution / 8, 1);
+            computeShader.Dispatch(1, resolution / 8, resolution / 8, 1);
+            computeShader.Dispatch(2, resolution / 8, resolution / 8, 1);
+        }
     }
 
     private void OnValidate()
     {
-        if (EditorApplication.isPlaying && Initialized)
+        if(Initialized && UnityEditor.EditorApplication.isPlaying)
         {
             UpdateSettings();
         }
@@ -139,21 +146,15 @@ public class Slime : MonoBehaviour
 
     void UpdateSettings()
     {
-        Settings newSettings = new Settings(
-            sensorSizeMin, sensorSizeMax,
-            sensorAngleMin, sensorAngleMax,
-            sensorDistanceMin, sensorDistanceMax,
-            moveSpeedMin, moveSpeedMax,
-            turnSpeedMin, turnSpeedMax
-        );
-        for (int i = 0; i < numSpecies; i++)
-        {
-            SpeciesBufferValues s = species[i];
-            s.RemapRanges(currentSettings.attributeRanges, newSettings.attributeRanges);
-        }
-        currentSettings = newSettings;
+        currentSettings = new Settings(new Vector2[] {
+            new Vector2(sensorSizeMin, sensorSizeMax),
+            new Vector2(sensorAngleMin, sensorAngleMax),
+            new Vector2(sensorDistanceMin, sensorDistanceMax),
+            new Vector2(moveSpeedMin, moveSpeedMax),
+            new Vector2(turnSpeedMin, turnSpeedMax)
+        });
 
-        speciesBuffer.SetData(species);
+        settingsBuffer.SetData(new Settings[] { currentSettings });
     }
 
     void remapFloatRange(float prevMin, float prevMax, float newMin, float newMax, ref float valueToRemap)
@@ -201,19 +202,17 @@ public class Slime : MonoBehaviour
 
     SpeciesBufferValues[] createSpecies()
     {
-
-        Debug.Log(currentSettings.moveSpeedMin);
         SpeciesBufferValues[] createdSpecies = new SpeciesBufferValues[numSpecies];
         for(int i = 0; i < numSpecies; i++)
         {
             SpeciesBufferValues s = defaultSpecies.CloneViaSerialization<SpeciesBufferValues>();
             s.index = i;
 
-            s.sensorSize = Mathf.FloorToInt(UnityEngine.Random.Range(currentSettings.sensorSizeMin, currentSettings.sensorSizeMax));
-            s.sensorAngle = UnityEngine.Random.Range(currentSettings.sensorAngleMin, currentSettings.sensorAngleMax);
-            s.sensorDistance = UnityEngine.Random.Range(currentSettings.sensorDistanceMin, currentSettings.sensorDistanceMax);
-            s.moveSpeed = UnityEngine.Random.Range(currentSettings.moveSpeedMin, currentSettings.moveSpeedMax);
-            s.turnSpeed = UnityEngine.Random.Range(currentSettings.turnSpeedMin, currentSettings.turnSpeedMax);
+            s.sensorSize = UnityEngine.Random.value;
+            s.sensorAngle = UnityEngine.Random.value;
+            s.sensorDistance = UnityEngine.Random.value;
+            s.moveSpeed = UnityEngine.Random.value;
+            s.turnSpeed = UnityEngine.Random.value;
 
             Color color = Color.HSVToRGB((float)i / numSpecies, 1, 1);
 
@@ -285,7 +284,7 @@ public struct SpeciesBufferValues
 
     public SpeciesBufferValues(
         int _index,
-        int _sensorSize,
+        float _sensorSize,
         float _sensorAngle,
         float _sensorDistance,
         float _moveSpeed,
@@ -304,57 +303,18 @@ public struct SpeciesBufferValues
     }
 
     public int index;
-    public int sensorSize;
+    public float sensorSize;
     public float sensorAngle;
     public float sensorDistance;
     public float moveSpeed;
     public float turnSpeed;
     public Vector4 color;
     public Vector4 inverseColor;
-
-    public void RemapRanges(float[,] prevRanges, float [,] newRanges)
-    {
-        float[] attributes = new float[5] {
-            sensorSize,
-            sensorAngle,
-            sensorDistance,
-            moveSpeed,
-            turnSpeed
-        };
-
-        for(int i = 0; i < 5; i++)
-        {
-            attributes[i] = remapFloatRange(
-                prevRanges[i, 0], prevRanges[i, 1],
-                newRanges[i, 0], newRanges[i, 1],
-                attributes[i]);
-        }
-
-        sensorSize = Mathf.FloorToInt(attributes[0]);
-        sensorAngle = attributes[1];
-        sensorDistance = attributes[2];
-        moveSpeed = attributes[3];
-        turnSpeed = attributes[4];
-    }
-
-    float remapFloatRange(float prevMin, float prevMax, float newMin, float newMax, float valueToRemap)
-    {
-        Debug.Log(string.Format("{0} --> {1}  |  {2} --> {3}", prevMin, prevMax, newMin, newMax));
-        float prevRange = prevMax - prevMin;
-        float newRange = newMax - newMin;
-
-        float value = valueToRemap - prevMin;
-        value = value / prevRange;
-        value = value * newRange;
-        value += newMin;
-
-        return value;
-    }
 }
 
-public struct Settings
+public struct SettingsBuilder
 {
-    public Settings(
+    public SettingsBuilder(
         float _sensorSizeMin,
         float _sensorSizeMax,
         float _sensorAngleMin,
@@ -376,8 +336,6 @@ public struct Settings
         moveSpeedMax= _moveSpeedMax;
         turnSpeedMin= _turnSpeedMin;
         turnSpeedMax= _turnSpeedMax;
-
-        Debug.Log("Settings: " + moveSpeedMin);
     }
 
     public float sensorSizeMin, sensorSizeMax, 
@@ -385,19 +343,21 @@ public struct Settings
         sensorDistanceMin, sensorDistanceMax, 
         moveSpeedMin, moveSpeedMax, 
         turnSpeedMin, turnSpeedMax;
+}
 
-    public float[,] attributeRanges
+public struct Settings
+{
+    public Settings(Vector2[] ranges)
     {
-        get
-        {
-            return new float[5, 2]
-            {
-                {sensorSizeMin, sensorSizeMax},
-                {sensorAngleMin, sensorAngleMax },
-                {sensorDistanceMin, sensorDistanceMax },
-                {moveSpeedMin, moveSpeedMax },
-                {turnSpeedMin, turnSpeedMax }
-            };
-        }
+        sensorSizeRange = ranges[0];
+        sensorAngleRange = ranges[1];
+        sensorDistanceRange = ranges[2];
+        moveSpeedRange = ranges[3];
+        turnSpeedRange = ranges[4];
     }
+    public Vector2 sensorSizeRange;
+    public Vector2 sensorAngleRange;
+    public Vector2 sensorDistanceRange;
+    public Vector2 moveSpeedRange;
+    public Vector2 turnSpeedRange;
 }

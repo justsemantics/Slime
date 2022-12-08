@@ -15,13 +15,22 @@ struct Actor
 struct Species
 {
     int index;
-    int sensorSize;
+    float sensorSize;
     float sensorAngle;
     float sensorDistance;
     float moveSpeed;
     float turnSpeed;
     float4 color;
     float4 inverseColor;
+};
+
+struct Settings
+{
+    float2 sensorSizeRange;
+    float2 sensorAngleRange;
+    float2 sensorDistanceRange;
+    float2 moveSpeedRange;
+    float2 turnSpeedRange;
 };
 
 int resolution;
@@ -35,6 +44,8 @@ RWStructuredBuffer<Actor> actors;
 
 StructuredBuffer<Species> species;
 
+StructuredBuffer<Settings> settingsBuffer;
+
 RWTexture2D<float4> _drawTex;
 
 Texture2D _trailTexToSample;
@@ -42,6 +53,13 @@ SamplerState sampler_trailTexToSample;
 
 RWTexture2D<float4> _trailTexToWrite;
 RWTexture2D<float4> _trailTexToWrite2;
+
+float4 sensorSizeRange;
+float4 sensorAngleRange;
+float4 sensorDistanceRange;
+float4 moveSpeedRange;
+float4 turnSpeedRange;
+
 
 float PI = 3.1415926535;
 
@@ -71,21 +89,6 @@ float Random(uint seed)
     return float(pcg_hash(seed)) / 4294967295.0;
 }
 
-float4 getVerticalAvg(int2 pos)
-{
-    int2 above = int2(pos.x, min(pos.y + 1, resolution));
-    int2 below = int2(pos.x, max(0, pos.y - 1));
-    float4 avg = (_trailTexToWrite[pos] + _trailTexToWrite[above] + _trailTexToWrite[below]) / 3;
-    return avg;
-}
-
-float4 getHorizontalAvg(int2 pos)
-{
-    int2 left = int2(max(0, pos.x - 1), pos.y);
-    int2 right = int2(min(pos.x + 1, resolution), pos.y);
-    float4 avg = (_trailTexToWrite[left] + _trailTexToWrite[pos] + _trailTexToWrite[right]) / 3;
-    return avg;
-}
 
 float2 getOffset(float angle, float distance)
 {
@@ -140,31 +143,39 @@ void UpdateActor (uint3 id : SV_DispatchThreadID)
 
     Species s = species[a.species];
     
-    float2 centerSensorPos = getOffset(a.angle, s.sensorDistance) + a.position;
-    float2 leftSensorPos = getOffset(a.angle + s.sensorAngle, s.sensorDistance) + a.position;
-    float2 rightSensorPos = getOffset(a.angle - s.sensorAngle, s.sensorDistance) + a.position;
+    Settings settings = settingsBuffer[0];
     
-    float4 centerSensorOutput = sensorSample(centerSensorPos, s.sensorSize);
+    int sensorSize = (int) floor(s.sensorSize * settings.sensorSizeRange.y + settings.sensorSizeRange.x);
+    float sensorAngle = s.sensorAngle * settings.sensorAngleRange.y + settings.sensorAngleRange.x;
+    float sensorDistance = s.sensorDistance * settings.sensorDistanceRange.y + settings.sensorDistanceRange.x;
+    float moveSpeed = s.moveSpeed * settings.moveSpeedRange.y + settings.moveSpeedRange.x;
+    float turnSpeed = s.turnSpeed * settings.turnSpeedRange.y + settings.turnSpeedRange.x;
+    
+    float2 centerSensorPos = getOffset(a.angle, sensorDistance) + a.position;
+    float2 leftSensorPos = getOffset(a.angle + sensorAngle, sensorDistance) + a.position;
+    float2 rightSensorPos = getOffset(a.angle - sensorAngle, sensorDistance) + a.position;
+    
+    float4 centerSensorOutput = sensorSample(centerSensorPos, sensorSize);
     float centerValue = dot(centerSensorOutput * s.color, float4(1, 1, 1, 1)) - dot(centerSensorOutput * s.inverseColor, float4(1,1,1,1))/2;
-    float4 leftSensorOutput = sensorSample(leftSensorPos, s.sensorSize);
+    float4 leftSensorOutput = sensorSample(leftSensorPos, sensorSize);
     float leftValue = dot(leftSensorOutput * s.color, float4(1, 1, 1, 1)) - dot(leftSensorOutput * s.inverseColor, float4(1, 1, 1, 1))/2;
-    float4 rightSensorOutput = sensorSample(rightSensorPos, s.sensorSize);
+    float4 rightSensorOutput = sensorSample(rightSensorPos, sensorSize);
     float rightValue = dot(rightSensorOutput * s.color, float4(1, 1, 1, 1)) - dot(rightSensorOutput * s.inverseColor, float4(1, 1, 1, 1))/2;
     uint seed = (uint) id.x + a.position.x + a.position.y + time;
     if (leftValue >= centerValue && leftValue > rightValue)
     {
-        a.angle += s.turnSpeed * deltaTime * Random(seed) * 3;
+        a.angle += turnSpeed * deltaTime * Random(seed) * 3;
     }
     else if (rightValue >= centerValue && rightValue > leftValue)
     {
-        a.angle -= s.turnSpeed * deltaTime * Random(seed) * 3;
+        a.angle -= turnSpeed * deltaTime * Random(seed) * 3;
     }
     else
     {
-        a.angle += (Random(seed) - 0.5) * 0.5 * s.turnSpeed * deltaTime;
+        a.angle += (Random(seed) - 0.5) * 0.5 * turnSpeed * deltaTime;
     }
     
-    float2 movement = getOffset(a.angle, s.moveSpeed * deltaTime);
+    float2 movement = getOffset(a.angle, moveSpeed * deltaTime);
 
     a.position = a.position + movement;
 
@@ -194,7 +205,7 @@ void UpdateActor (uint3 id : SV_DispatchThreadID)
     
     float turnBackWeight = 0.05;
     
-    a.angle += (turnBackWeight * turnBackDirection * turnBackDistance) * s.turnSpeed * deltaTime;
+    a.angle += (turnBackWeight * turnBackDirection * turnBackDistance) * turnSpeed * deltaTime;
     
     
     
@@ -207,34 +218,6 @@ void UpdateActor (uint3 id : SV_DispatchThreadID)
     _trailTexToWrite[texturePosition] += s.color;
     _trailTexToWrite2[texturePosition] += s.color;
 }
-
-float4 applySquareKernel(int2 coords, float kernel[3][3], float weight)
-{
-    int left = max(0, coords.x - 1);
-    int right = min(coords.x + 1, resolution);
-    int above = min(coords.y + 1, resolution);
-    int below = max(0, coords.y - 1);
-    float4 sum =
-        _trailTexToWrite[int2(left, above)] * kernel[0][0] +
-        _trailTexToWrite[int2(coords.x, above)] * kernel[1][0] +
-        _trailTexToWrite[int2(right, above)] * kernel[2][0] +
-        _trailTexToWrite[int2(left, coords.y)] * kernel[0][1] +
-        _trailTexToWrite[int2(coords.x, coords.y)] * kernel[1][1]+
-        _trailTexToWrite[int2(right, coords.y)] * kernel[2][1] +
-        _trailTexToWrite[int2(left, below)] * kernel[0][2] +
-        _trailTexToWrite[int2(coords.x, below)] * kernel[1][2] +
-        _trailTexToWrite[int2(right, below)] * kernel[2][2];
-    
-    return sum / weight;
-}
-
-//gaussian
-float gaussKernel[3][3] =
-{
-    { 0.1, 0.5, 0.1 },
-    { 0.5, 0, 0.5 },
-    { 0.1, 0.5, 0.1 }
-};
 
 [numthreads(8, 8, 1)]
 void UpdateTrailsHorizontal (uint3 id : SV_DispatchThreadID)
