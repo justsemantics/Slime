@@ -1,0 +1,313 @@
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel UpdateActor
+#pragma kernel UpdateTrailsHorizontal
+#pragma kernel UpdateTrailsVertical
+#pragma kernel DrawFieldBoundary
+
+
+struct Actor
+{
+    int species;
+    float2 position;
+    float angle;
+};
+
+struct Species
+{
+    int index;
+    int sensorSize;
+    float sensorAngle;
+    float sensorDistance;
+    float moveSpeed;
+    float turnSpeed;
+    float4 color;
+    float4 inverseColor;
+};
+
+int resolution;
+
+float deltaTime;
+float time;
+
+float evaporateSpeed;
+
+RWStructuredBuffer<Actor> actors;
+
+StructuredBuffer<Species> species;
+
+RWTexture2D<float4> _drawTex;
+
+Texture2D _trailTexToSample;
+SamplerState sampler_trailTexToSample;
+
+RWTexture2D<float4> _trailTexToWrite;
+RWTexture2D<float4> _trailTexToWrite2;
+
+float PI = 3.1415926535;
+
+// Hash function from H. Schechter & R. Bridson, goo.gl/RXiKaH
+uint Hash(uint s)
+{
+    s ^= 2747636419u;
+    s *= 2654435769u;
+    s ^= s >> 16;
+    s *= 2654435769u;
+    s ^= s >> 16;
+    s *= 2654435769u;
+    return s;
+}
+
+//from https://www.reedbeta.com/blog/hash-functions-for-gpu-rendering/
+uint pcg_hash(uint input)
+{
+    uint state = input * 747796405u + 2891336453u;
+    uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+float Random(uint seed)
+{
+    //return float(Hash(seed)) / 4294967295.0; // 2^32-1
+    return float(pcg_hash(seed)) / 4294967295.0;
+}
+
+float4 getVerticalAvg(int2 pos)
+{
+    int2 above = int2(pos.x, min(pos.y + 1, resolution));
+    int2 below = int2(pos.x, max(0, pos.y - 1));
+    float4 avg = (_trailTexToWrite[pos] + _trailTexToWrite[above] + _trailTexToWrite[below]) / 3;
+    return avg;
+}
+
+float4 getHorizontalAvg(int2 pos)
+{
+    int2 left = int2(max(0, pos.x - 1), pos.y);
+    int2 right = int2(min(pos.x + 1, resolution), pos.y);
+    float4 avg = (_trailTexToWrite[left] + _trailTexToWrite[pos] + _trailTexToWrite[right]) / 3;
+    return avg;
+}
+
+float2 getOffset(float angle, float distance)
+{
+    return float2(
+        cos(angle) * distance,
+        sin(angle) * distance
+    );
+}
+
+float4 sensorSample(int2 position, int size)
+{
+    float4 sum = float4(0, 0, 0, 0);
+    int samplesTaken = 0;
+    int2 currentSampleOffset = int2(-size, -size);
+    while (true)
+    {
+        int2 currentSamplePosition = position + currentSampleOffset;
+        
+        //only sample within the image
+        if (currentSamplePosition.y >= 0 &&
+            currentSamplePosition.y <= resolution &&
+            currentSamplePosition.x >= 0 &&
+            currentSamplePosition.x <= resolution)
+        {
+            sum += _trailTexToWrite[currentSamplePosition];
+            samplesTaken++;
+        }
+        
+        currentSampleOffset.x++;
+        
+        if (currentSampleOffset.x > size)
+        {
+            currentSampleOffset.x = -size;
+            currentSampleOffset.y++;
+        }
+        
+        if (currentSampleOffset.y > size)
+        {
+            float4 result = sum / samplesTaken;
+            return result;
+        }
+    }
+    
+    //hopefully not
+    return sum;
+}
+
+[numthreads(16,1,1)]
+void UpdateActor (uint3 id : SV_DispatchThreadID)
+{
+    Actor a = actors[id.x];
+
+    Species s = species[a.species];
+    
+    float2 centerSensorPos = getOffset(a.angle, s.sensorDistance) + a.position;
+    float2 leftSensorPos = getOffset(a.angle + s.sensorAngle, s.sensorDistance) + a.position;
+    float2 rightSensorPos = getOffset(a.angle - s.sensorAngle, s.sensorDistance) + a.position;
+    
+    float4 centerSensorOutput = sensorSample(centerSensorPos, s.sensorSize);
+    float centerValue = dot(centerSensorOutput * s.color, float4(1, 1, 1, 1)) - dot(centerSensorOutput * s.inverseColor, float4(1,1,1,1))/2;
+    float4 leftSensorOutput = sensorSample(leftSensorPos, s.sensorSize);
+    float leftValue = dot(leftSensorOutput * s.color, float4(1, 1, 1, 1)) - dot(leftSensorOutput * s.inverseColor, float4(1, 1, 1, 1))/2;
+    float4 rightSensorOutput = sensorSample(rightSensorPos, s.sensorSize);
+    float rightValue = dot(rightSensorOutput * s.color, float4(1, 1, 1, 1)) - dot(rightSensorOutput * s.inverseColor, float4(1, 1, 1, 1))/2;
+    uint seed = (uint) id.x + a.position.x + a.position.y + time;
+    if (leftValue >= centerValue && leftValue > rightValue)
+    {
+        a.angle += s.turnSpeed * deltaTime * Random(seed) * 3;
+    }
+    else if (rightValue >= centerValue && rightValue > leftValue)
+    {
+        a.angle -= s.turnSpeed * deltaTime * Random(seed) * 3;
+    }
+    else
+    {
+        a.angle += (Random(seed) - 0.5) * 0.5 * s.turnSpeed * deltaTime;
+    }
+    
+    float2 movement = getOffset(a.angle, s.moveSpeed * deltaTime);
+
+    a.position = a.position + movement;
+
+    /* bounce off edges
+    if (a.position.x > resolution || a.position.x < 0)
+    {
+        a.angle = acos(-(normalize(movement).x));
+    }
+    if (a.position.y > resolution || a.position.y < 0)
+    {
+        a.angle = -a.angle;
+    }
+    */
+    
+    if (a.position.x > resolution || a.position.x < 0 || a.position.y > resolution || a.position.y < 0)
+    {
+        a.angle = (Random(seed + id.x + time)) * 360;
+    }
+    
+    float2 center = float2(resolution / 2., resolution / 2.);
+    float radiusSquared = (resolution / 2) * (resolution / 2);
+    float distanceSquaredFromCenter = dot(a.position - center, a.position - center);
+    
+    float turnBackDistance = max(distanceSquaredFromCenter - radiusSquared, 0);
+    
+    float turnBackDirection = saturate(max(dot(a.position - center, movement), 0));
+    
+    float turnBackWeight = 0.05;
+    
+    a.angle += (turnBackWeight * turnBackDirection * turnBackDistance) * s.turnSpeed * deltaTime;
+    
+    
+    
+
+    a.position = clamp(a.position, float2(0, 0), float2(resolution, resolution));
+    int2 texturePosition = int2(floor(a.position.x), floor(a.position.y));
+    
+    actors[id.x] = a;
+
+    _trailTexToWrite[texturePosition] += s.color;
+    _trailTexToWrite2[texturePosition] += s.color;
+}
+
+float4 applySquareKernel(int2 coords, float kernel[3][3], float weight)
+{
+    int left = max(0, coords.x - 1);
+    int right = min(coords.x + 1, resolution);
+    int above = min(coords.y + 1, resolution);
+    int below = max(0, coords.y - 1);
+    float4 sum =
+        _trailTexToWrite[int2(left, above)] * kernel[0][0] +
+        _trailTexToWrite[int2(coords.x, above)] * kernel[1][0] +
+        _trailTexToWrite[int2(right, above)] * kernel[2][0] +
+        _trailTexToWrite[int2(left, coords.y)] * kernel[0][1] +
+        _trailTexToWrite[int2(coords.x, coords.y)] * kernel[1][1]+
+        _trailTexToWrite[int2(right, coords.y)] * kernel[2][1] +
+        _trailTexToWrite[int2(left, below)] * kernel[0][2] +
+        _trailTexToWrite[int2(coords.x, below)] * kernel[1][2] +
+        _trailTexToWrite[int2(right, below)] * kernel[2][2];
+    
+    return sum / weight;
+}
+
+//gaussian
+float gaussKernel[3][3] =
+{
+    { 0.1, 0.5, 0.1 },
+    { 0.5, 0, 0.5 },
+    { 0.1, 0.5, 0.1 }
+};
+
+[numthreads(8, 8, 1)]
+void UpdateTrailsHorizontal (uint3 id : SV_DispatchThreadID)
+{    
+    float otherKernel[7] =
+    {
+        0.001,
+        0.01,
+        0.2,
+        4.,
+        0.2,
+        0.01,
+        0.001
+    };
+    
+    float4 sum = float4(0, 0, 0, 0);
+    
+    for (int x = 0; x < 7; x++)
+    {
+        float2 uv = float2(id.x + 0.5 + (x - 3), id.y + 0.5) / (float) resolution;
+        sum += (_trailTexToSample.SampleLevel(sampler_trailTexToSample, uv, 0)) * otherKernel[x];
+    }
+    
+    float4 col = sum / 4.422;
+    //col.g = _trailTexToWrite[id.xy].g;
+    
+    _trailTexToWrite[id.xy] = col;
+}
+
+[numthreads(8, 8, 1)]
+void UpdateTrailsVertical(uint3 id : SV_DispatchThreadID)
+{
+    float otherKernel[7] =
+    {
+        0.001,
+        0.01,
+        0.2,
+        4.,
+        0.2,
+        0.01,
+        0.001
+    };
+    
+    float4 sum = float4(0, 0, 0, 0);
+    
+    for (int y = 0; y < 7; y++)
+    {
+        float2 uv = float2(id.x + 0.5, id.y + (y - 3) + 0.5) / (float) resolution;
+        sum += (_trailTexToSample.SampleLevel(sampler_trailTexToSample, uv, 0)) * otherKernel[y];
+    }
+    
+    float4 col = sum / 4.422;
+    
+    col -= ((1. / evaporateSpeed) * deltaTime);
+    
+    col.a = 1.;
+    
+    //col.g = _trailTexToWrite[id.xy].g;
+    _trailTexToWrite[id.xy] = col;
+}
+
+[numthreads(8,8,1)]
+void DrawFieldBoundary(uint3 id : SV_DispatchThreadID)
+{
+    float2 center = float2(resolution / 2., resolution / 2.);
+    float radiusSquared = (resolution / 2) * (resolution / 2);
+    float distanceSquaredFromCenter = dot(id.xy - center, id.xy - center);
+    
+    float4 color = float4(0, max(distanceSquaredFromCenter - radiusSquared, 0), 0, 1);
+    color = saturate(color);
+    
+    _trailTexToWrite[id.xy] = color;
+    _trailTexToWrite2[id.xy] = color;
+}
+
+
