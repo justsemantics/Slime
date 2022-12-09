@@ -31,6 +31,8 @@ struct Settings
     float2 sensorDistanceRange;
     float2 moveSpeedRange;
     float2 turnSpeedRange;
+    
+    float angleAdjustmentWeight;
 };
 
 int resolution;
@@ -47,6 +49,9 @@ StructuredBuffer<Species> species;
 StructuredBuffer<Settings> settingsBuffer;
 
 RWTexture2D<float4> _drawTex;
+
+Texture2D _angleAdjustmentTexture;
+SamplerState sampler_angleAdjustmentTexture;
 
 Texture2D _trailTexToSample;
 SamplerState sampler_trailTexToSample;
@@ -145,6 +150,9 @@ void UpdateActor (uint3 id : SV_DispatchThreadID)
     
     Settings settings = settingsBuffer[0];
     
+    
+    float angleAdjustmentWeight = settings.angleAdjustmentWeight;
+    
     int sensorSize = (int) floor(s.sensorSize * settings.sensorSizeRange.y + settings.sensorSizeRange.x);
     float sensorAngle = s.sensorAngle * settings.sensorAngleRange.y + settings.sensorAngleRange.x;
     float sensorDistance = s.sensorDistance * settings.sensorDistanceRange.y + settings.sensorDistanceRange.x;
@@ -217,6 +225,7 @@ void UpdateActor (uint3 id : SV_DispatchThreadID)
 
     _trailTexToWrite[texturePosition] += s.color;
     _trailTexToWrite2[texturePosition] += s.color;
+    
 }
 
 [numthreads(8, 8, 1)]

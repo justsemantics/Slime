@@ -9,20 +9,39 @@ using UnityEngine.Experimental.Rendering;
 
 public class Slime : MonoBehaviour
 {
-    SpeciesBufferValues defaultSpecies;
+    #region private variables
+    
+    private bool Initialized = false;
+
+    [SerializeField]
+    private ComputeShader computeShader;
+
+    private ComputeBuffer actorBuffer, speciesBuffer, settingsBuffer;
+
+    private RenderTexture drawTexture, trailTexture, trailTexture2;
+
+    [SerializeField]
+    private Texture2D angleAdjustmentTexture;
+
+    private Settings currentSettings;
+    private Species[] species;
+    private Actor[] actors;
+
+    //parameters
+    [SerializeField]
+    private int resolution, numSpecies, numActors;
 
     [SerializeField]
     [Range(0, 30)]
-    public int sensorSizeMin, sensorSizeMax;
-
+    private float sensorSizeMin, sensorSizeMax;
 
     [SerializeField]
     [Range(0f, 300f)]
-    float moveSpeedMin, moveSpeedMax;
+    private float moveSpeedMin, moveSpeedMax;
 
     [SerializeField]
     [Range(0f, 45f)]
-    float sensorAngleMin,
+    private float sensorAngleMin,
         sensorAngleMax,
         sensorDistanceMin,
         sensorDistanceMax,
@@ -30,52 +49,62 @@ public class Slime : MonoBehaviour
         turnSpeedMax;
 
     [SerializeField]
-    int numActors;
+    [Range(0f, 1f)]
+    private float angleAdjustmentWeight;
+
 
     [SerializeField]
-    ComputeShader computeShader;
+    private float evaporateSpeed;
 
-    [SerializeField]
-    int resolution;
+    #endregion
 
-    [SerializeField]
-    float evaporateSpeed;
+    #region public methods
+    //haha
+    #endregion
 
-    [SerializeField]
-    int numSpecies;
-
-    Actor[] actors;
-    SpeciesBufferValues[] species;
-
-    RenderTexture drawTexture, trailTexture;
-    RenderTexture trailTexture2;
-
-    ComputeBuffer actorBuffer, speciesBuffer, settingsBuffer;
-
-    Settings currentSettings;
-
-    bool Initialized = false;
+    #region unity methods
 
     // Start is called before the first frame update
-    void Start()
+    private void Start()
     {
-        currentSettings = new Settings( new Vector2[] {
-            new Vector2(sensorSizeMin, sensorSizeMax),
-            new Vector2(sensorAngleMin, sensorAngleMax),
-            new Vector2(sensorDistanceMin, sensorDistanceMax),
-            new Vector2(moveSpeedMin, moveSpeedMax),
-            new Vector2(turnSpeedMin, turnSpeedMax)
-        });
+        initialize();
+    }
 
-        defaultSpecies.index = 0;
-        defaultSpecies.sensorAngle = 1;
-        defaultSpecies.sensorDistance = 1;
-        defaultSpecies.sensorSize = 1;
-        defaultSpecies.turnSpeed = 1;
-        defaultSpecies.moveSpeed = 1;
-        defaultSpecies.color = new Vector4(1, 1, 1, 1);
-        defaultSpecies.inverseColor = new Vector4(0, 0, 0, 0);
+    // Update is called once per frame
+    private void Update()
+    {
+        if (Initialized)
+        {
+            //these values change every frame
+            computeShader.SetFloat("deltaTime", Time.deltaTime);
+            computeShader.SetFloat("time", Time.time);
 
+            //run main sim
+            computeShader.Dispatch(0, numActors / 16, 1, 1);
+
+            //blur the trail texture in two passes
+            computeShader.Dispatch(1, resolution / 8, resolution / 8, 1);
+            computeShader.Dispatch(2, resolution / 8, resolution / 8, 1);
+        }
+    }
+
+    /// <summary>
+    /// handle changes from within the editor window
+    /// </summary>
+    private void OnValidate()
+    {
+        if (Initialized && UnityEditor.EditorApplication.isPlaying)
+        {
+            UpdateSettings();
+        }
+    }
+    #endregion
+
+    #region private methods
+
+    private void initialize()
+    {
+        //set up textures
         trailTexture = new RenderTexture(resolution, resolution, 0);
         trailTexture.enableRandomWrite = true;
         trailTexture.filterMode = FilterMode.Point;
@@ -84,19 +113,22 @@ public class Slime : MonoBehaviour
         drawTexture = new RenderTexture(trailTexture);
         trailTexture2 = new RenderTexture(trailTexture);
 
-        createActorsCircle();
+        //set up buffers
         actorBuffer = new ComputeBuffer(numActors, sizeof(int) + 3 * sizeof(float));
+        actors = createActorsCircle(0.5f);
         actorBuffer.SetData(actors);
+
         speciesBuffer = new ComputeBuffer(numSpecies, sizeof(int) * 2 + sizeof(float) * 12);
         species = createSpecies();
         speciesBuffer.SetData(species);
-        settingsBuffer = new ComputeBuffer(1, sizeof(float) * 10);
-        settingsBuffer.SetData(new Settings[] { currentSettings });
-        
 
+        settingsBuffer = new ComputeBuffer(1, sizeof(float) * 11);
+        UpdateSettings();
 
+        //pass textures to compute shader
         computeShader.SetTexture(0, "_trailTexToWrite", trailTexture);
         computeShader.SetTexture(0, "_trailTexToWrite2", trailTexture2);
+        computeShader.SetTexture(0, "_angleAdjustmentTexture", angleAdjustmentTexture);
 
         computeShader.SetTexture(1, "_trailTexToWrite", trailTexture);
         computeShader.SetTexture(1, "_trailTexToSample", trailTexture2);
@@ -107,182 +139,160 @@ public class Slime : MonoBehaviour
         computeShader.SetTexture(3, "_trailTexToWrite", trailTexture);
         computeShader.SetTexture(3, "_trailTexToWrite2", trailTexture2);
 
+        //pass parameters and buffers to shader
         computeShader.SetInt("resolution", resolution);
+        computeShader.SetFloat("evaporateSpeed", evaporateSpeed);
+
         computeShader.SetBuffer(0, "actors", actorBuffer);
         computeShader.SetBuffer(0, "species", speciesBuffer);
         computeShader.SetBuffer(0, "settingsBuffer", settingsBuffer);
 
-        computeShader.SetFloat("evaporateSpeed", evaporateSpeed);
-
+        //set up renderer to draw the results
         Renderer r = GetComponent<Renderer>();
         r.material.SetTexture("_MainTex", trailTexture2);
         r.material.SetTexture("_MetallicGlossMap", trailTexture2);
         r.material.SetTexture("_SmoothnessTextureChannel", trailTexture2);
 
+        //done initialization, ready to update
         Initialized = true;
     }
 
-    // Update is called once per frame
-    void Update()
+    /// <summary>
+    /// when public variables are changed, create a new Settings struct and push it to the GPU
+    /// </summary>
+    private void UpdateSettings()
     {
-        if (Initialized)
-        {
-            computeShader.SetFloat("deltaTime", Time.deltaTime);
-            computeShader.SetFloat("time", Time.time);
-            computeShader.Dispatch(0, numActors / 16, 1, 1);
-
-            computeShader.Dispatch(1, resolution / 8, resolution / 8, 1);
-            computeShader.Dispatch(2, resolution / 8, resolution / 8, 1);
-        }
-    }
-
-    private void OnValidate()
-    {
-        if(Initialized && UnityEditor.EditorApplication.isPlaying)
-        {
-            UpdateSettings();
-        }
-    }
-
-    void UpdateSettings()
-    {
-        currentSettings = new Settings(new Vector2[] {
-            new Vector2(sensorSizeMin, sensorSizeMax),
-            new Vector2(sensorAngleMin, sensorAngleMax),
-            new Vector2(sensorDistanceMin, sensorDistanceMax),
-            new Vector2(moveSpeedMin, moveSpeedMax),
-            new Vector2(turnSpeedMin, turnSpeedMax)
-        });
+        currentSettings = getSettings();
 
         settingsBuffer.SetData(new Settings[] { currentSettings });
     }
 
-    void remapFloatRange(float prevMin, float prevMax, float newMin, float newMax, ref float valueToRemap)
+    /// <summary>
+    /// Returns Settings struct created from the public class variables
+    /// </summary>
+    /// <returns></returns>
+    private Settings getSettings()
     {
-        float prevRange = prevMax - prevMin;
-        float newRange = newMax - newMin;
+        Settings newSettings = new Settings(
+            new Vector2[] {
+                new Vector2(sensorSizeMin, sensorSizeMax),
+                new Vector2(sensorAngleMin, sensorAngleMax),
+                new Vector2(sensorDistanceMin, sensorDistanceMax),
+                new Vector2(moveSpeedMin, moveSpeedMax),
+                new Vector2(turnSpeedMin, turnSpeedMax)
+            },
+            new float[]
+            {
+                angleAdjustmentWeight
+            });
 
-        float value = valueToRemap - prevMin;
-        value = value / prevRange;
-        value = value * newRange;
-        value += newMin;
-
-        valueToRemap = value;
+        return newSettings;
     }
 
-    void createActors()
+    /// <summary>
+    /// Creates an array of numSpecies randomly generated Species
+    /// </summary>
+    /// <returns></returns>
+    private Species[] createSpecies()
     {
-        actors = new Actor[numActors];
-        for(int i = 0; i < numActors; i++)
+        Species[] createdSpecies = new Species[numSpecies];
+        for (int i = 0; i < numSpecies; i++)
         {
-            Actor a = new Actor();
-            a.species = i % numSpecies;
-            a.position = new Vector2(
-                UnityEngine.Random.value * resolution,
-                UnityEngine.Random.value * resolution);
-            a.angle = UnityEngine.Random.Range(0, 2 * Mathf.PI);
-            actors[i] = a;
-        }
-    }
-
-    void createActorsCircle()
-    {
-        actors = new Actor[numActors];
-        for (int i = 0; i < numActors; i++)
-        {
-            Actor a = new Actor();
-            a.species = i % 10;
-            a.position = ((UnityEngine.Random.insideUnitCircle / 3) + Vector2.one / 2) * resolution;
-            a.angle = UnityEngine.Random.Range(0, 2 * Mathf.PI);
-            actors[i] = a;
-        }
-    }
-
-
-
-    SpeciesBufferValues[] createSpecies()
-    {
-        SpeciesBufferValues[] createdSpecies = new SpeciesBufferValues[numSpecies];
-        for(int i = 0; i < numSpecies; i++)
-        {
-            SpeciesBufferValues s = defaultSpecies.CloneViaSerialization<SpeciesBufferValues>();
-            s.index = i;
-
-            s.sensorSize = UnityEngine.Random.value;
-            s.sensorAngle = UnityEngine.Random.value;
-            s.sensorDistance = UnityEngine.Random.value;
-            s.moveSpeed = UnityEngine.Random.value;
-            s.turnSpeed = UnityEngine.Random.value;
-
+            //color is evenly spread around the color wheel
             Color color = Color.HSVToRGB((float)i / numSpecies, 1, 1);
 
             Color inverseColor = Vector4.one - (Vector4)color;
 
-            s.color = color;
-            s.inverseColor = inverseColor;
+            //all other parameters are random between 0-1
+            Species s = new Species(
+                _index: i,
+                _sensorSize: UnityEngine.Random.value,
+                _sensorAngle: UnityEngine.Random.value,
+                _sensorDistance: UnityEngine.Random.value,
+                _moveSpeed: UnityEngine.Random.value,
+                _turnSpeed: UnityEngine.Random.value,
+                _color: color,
+                _inverseColor: inverseColor);
 
             createdSpecies[i] = s;
         }
 
         return createdSpecies;
     }
-}
 
-public class Species
-{
-    public int index;
-    public int sensorSize;
-    public float sensorAngle;
-    public float sensorDistance;
-    public float turnSpeed;
-    public float moveSpeed;
-    public Vector4 color;
-    public Vector4 inverseColor;
-
-    private float[] a;
-
-    public SpeciesBufferValues Values
+    /// <summary>
+    /// creates numActors Actors randomly distributed on the texture
+    /// </summary>
+    /// <returns></returns>
+    private Actor[] createActors()
     {
-        get
+        Actor[] createdActors = new Actor[numActors];
+        for (int i = 0; i < numActors; i++)
         {
-            return new SpeciesBufferValues(
-                index,
-                sensorSize,
-                sensorAngle,
-                sensorDistance,
-                turnSpeed,
-                moveSpeed,
-                color,
-                inverseColor);
+            int species = i % numSpecies;
+            Vector2 position = new Vector2(
+                UnityEngine.Random.value * resolution,
+                UnityEngine.Random.value * resolution);
+            float angle = UnityEngine.Random.Range(0, 2 * Mathf.PI);
+
+            Actor a = new Actor(species, position, angle);
+
+            createdActors[i] = a;
         }
+
+        return createdActors;
     }
 
-    public void RemapRanges(float[,] ranges)
+    /// <summary>
+    /// creates numActors Actors in a circle. A radius of 0.5 will touch the sides
+    /// </summary>
+    /// <returns></returns>
+    private Actor[] createActorsCircle(float radius)
     {
-        float[] values = new float[]
+        Actor[] createdActors = new Actor[numActors];
+        for (int i = 0; i < numActors; i++)
         {
-            sensorAngle,
-            sensorDistance,
-            turnSpeed,
-            moveSpeed
-        };
+            int species = i % 10;
+            Vector2 position = ((UnityEngine.Random.insideUnitCircle) + Vector2.one) * radius * resolution;
+            float angle = UnityEngine.Random.Range(0, 2 * Mathf.PI);
 
+            Actor a = new Actor(species, position, angle);
 
+            createdActors[i] = a;
+        }
+
+        return createdActors;
     }
 
+    #endregion
 }
 
-public struct Actor
+
+public struct Settings
 {
-    public int species;
-    public Vector2 position;
-    public float angle;
+    public Settings(Vector2[] ranges, float[] weights)
+    {
+        sensorSizeRange = ranges[0];
+        sensorAngleRange = ranges[1];
+        sensorDistanceRange = ranges[2];
+        moveSpeedRange = ranges[3];
+        turnSpeedRange = ranges[4];
+
+        angleAdjustmentWeight = weights[0];
+    }
+
+    public Vector2 sensorSizeRange;
+    public Vector2 sensorAngleRange;
+    public Vector2 sensorDistanceRange;
+    public Vector2 moveSpeedRange;
+    public Vector2 turnSpeedRange;
+
+    public float angleAdjustmentWeight;
 }
 
-public struct SpeciesBufferValues
+public struct Species
 {
-
-    public SpeciesBufferValues(
+    public Species(
         int _index,
         float _sensorSize,
         float _sensorAngle,
@@ -312,52 +322,20 @@ public struct SpeciesBufferValues
     public Vector4 inverseColor;
 }
 
-public struct SettingsBuilder
+public struct Actor
 {
-    public SettingsBuilder(
-        float _sensorSizeMin,
-        float _sensorSizeMax,
-        float _sensorAngleMin,
-        float _sensorAngleMax,
-        float _sensorDistanceMin,
-        float _sensorDistanceMax,
-        float _moveSpeedMin,
-        float _moveSpeedMax,
-        float _turnSpeedMin,
-        float _turnSpeedMax)
+    public Actor(
+        int _species,
+        Vector2 _position,
+        float _angle)
     {
-        sensorSizeMin= _sensorSizeMin;
-        sensorSizeMax= _sensorSizeMax;
-        sensorAngleMin= _sensorAngleMin;
-        sensorAngleMax= _sensorAngleMax;
-        sensorDistanceMin= _sensorDistanceMin;
-        sensorDistanceMax= _sensorDistanceMax;
-        moveSpeedMin= _moveSpeedMin;
-        moveSpeedMax= _moveSpeedMax;
-        turnSpeedMin= _turnSpeedMin;
-        turnSpeedMax= _turnSpeedMax;
+        species = _species;
+        position = _position;
+        angle = _angle;
     }
 
-    public float sensorSizeMin, sensorSizeMax, 
-        sensorAngleMin, sensorAngleMax, 
-        sensorDistanceMin, sensorDistanceMax, 
-        moveSpeedMin, moveSpeedMax, 
-        turnSpeedMin, turnSpeedMax;
+    public int species;
+    public Vector2 position;
+    public float angle;
 }
 
-public struct Settings
-{
-    public Settings(Vector2[] ranges)
-    {
-        sensorSizeRange = ranges[0];
-        sensorAngleRange = ranges[1];
-        sensorDistanceRange = ranges[2];
-        moveSpeedRange = ranges[3];
-        turnSpeedRange = ranges[4];
-    }
-    public Vector2 sensorSizeRange;
-    public Vector2 sensorAngleRange;
-    public Vector2 sensorDistanceRange;
-    public Vector2 moveSpeedRange;
-    public Vector2 turnSpeedRange;
-}
