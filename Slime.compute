@@ -2,7 +2,6 @@
 #pragma kernel UpdateActor
 #pragma kernel UpdateTrailsHorizontal
 #pragma kernel UpdateTrailsVertical
-#pragma kernel DrawFieldBoundary
 
 
 struct Actor
@@ -20,6 +19,8 @@ struct Species
     float sensorDistance;
     float moveSpeed;
     float turnSpeed;
+    float intentionalTurnWeight;
+    float randomTurnWeight;
     float4 color;
     float4 inverseColor;
 };
@@ -31,24 +32,27 @@ struct Settings
     float2 sensorDistanceRange;
     float2 moveSpeedRange;
     float2 turnSpeedRange;
+    float2 intentionalTurnRange;
+    float2 randomTurnRange;
     
     float angleAdjustmentWeight;
 };
 
+//parameters with no struct
 int resolution;
-
 float deltaTime;
 float time;
-
 float evaporateSpeed;
 
+//buffers
 RWStructuredBuffer<Actor> actors;
-
 StructuredBuffer<Species> species;
-
 StructuredBuffer<Settings> settingsBuffer;
 
+//textures and samplers
 RWTexture2D<float4> _drawTex;
+RWTexture2D<float4> _trailTexToWrite;
+RWTexture2D<float4> _trailTexToWrite2;
 
 Texture2D _angleAdjustmentTexture;
 SamplerState sampler_angleAdjustmentTexture;
@@ -56,29 +60,8 @@ SamplerState sampler_angleAdjustmentTexture;
 Texture2D _trailTexToSample;
 SamplerState sampler_trailTexToSample;
 
-RWTexture2D<float4> _trailTexToWrite;
-RWTexture2D<float4> _trailTexToWrite2;
-
-float4 sensorSizeRange;
-float4 sensorAngleRange;
-float4 sensorDistanceRange;
-float4 moveSpeedRange;
-float4 turnSpeedRange;
-
 
 float PI = 3.1415926535;
-
-// Hash function from H. Schechter & R. Bridson, goo.gl/RXiKaH
-uint Hash(uint s)
-{
-    s ^= 2747636419u;
-    s *= 2654435769u;
-    s ^= s >> 16;
-    s *= 2654435769u;
-    s ^= s >> 16;
-    s *= 2654435769u;
-    return s;
-}
 
 //from https://www.reedbeta.com/blog/hash-functions-for-gpu-rendering/
 uint pcg_hash(uint input)
@@ -90,10 +73,8 @@ uint pcg_hash(uint input)
 
 float Random(uint seed)
 {
-    //return float(Hash(seed)) / 4294967295.0; // 2^32-1
     return float(pcg_hash(seed)) / 4294967295.0;
 }
-
 
 float2 getOffset(float angle, float distance)
 {
@@ -103,33 +84,42 @@ float2 getOffset(float angle, float distance)
     );
 }
 
+//samples a square of pixels centered on "position," square extends "size" pixels in all four directions
 float4 sensorSample(int2 position, int size)
 {
     float4 sum = float4(0, 0, 0, 0);
     int samplesTaken = 0;
+    
+    //start sampling at bottom left corner
     int2 currentSampleOffset = int2(-size, -size);
     while (true)
     {
         int2 currentSamplePosition = position + currentSampleOffset;
         
         //only sample within the image
-        if (currentSamplePosition.y >= 0 &&
-            currentSamplePosition.y <= resolution &&
-            currentSamplePosition.x >= 0 &&
-            currentSamplePosition.x <= resolution)
+        if (currentSamplePosition.y < 0 &&
+            currentSamplePosition.y > resolution &&
+            currentSamplePosition.x < 0 &&
+            currentSamplePosition.x > resolution)
         {
-            sum += _trailTexToWrite[currentSamplePosition];
-            samplesTaken++;
+            continue;
         }
         
+        //sample trail texture at position
+        sum += _trailTexToWrite[currentSamplePosition];
+        samplesTaken++;
+        
+        //increment x
         currentSampleOffset.x++;
         
+        //wrap around to the next row if x exceeds size
         if (currentSampleOffset.x > size)
         {
             currentSampleOffset.x = -size;
             currentSampleOffset.y++;
         }
         
+        //when reaching the end of the last row, calculate the result
         if (currentSampleOffset.y > size)
         {
             float4 result = sum / samplesTaken;
@@ -137,72 +127,72 @@ float4 sensorSample(int2 position, int size)
         }
     }
     
-    //hopefully not
+    //hopefully never reach this
     return sum;
 }
 
-[numthreads(16,1,1)]
+[numthreads(64,1,1)]
 void UpdateActor (uint3 id : SV_DispatchThreadID)
 {
+    //read info from buffers
     Actor a = actors[id.x];
-
     Species s = species[a.species];
-    
     Settings settings = settingsBuffer[0];
     
-    
+    //calculate adjustment to angle from texture
+    float2 uv = a.position / resolution;
+    float4 angleAdjustment = _angleAdjustmentTexture.SampleLevel(sampler_angleAdjustmentTexture, uv, 0);
     float angleAdjustmentWeight = settings.angleAdjustmentWeight;
     
+    //initialize variables from settings
     int sensorSize = (int) floor(s.sensorSize * settings.sensorSizeRange.y + settings.sensorSizeRange.x);
-    float sensorAngle = s.sensorAngle * settings.sensorAngleRange.y + settings.sensorAngleRange.x;
+    float sensorAngle = (s.sensorAngle + (angleAdjustment - 0.5) * angleAdjustmentWeight) * settings.sensorAngleRange.y + settings.sensorAngleRange.x;
     float sensorDistance = s.sensorDistance * settings.sensorDistanceRange.y + settings.sensorDistanceRange.x;
     float moveSpeed = s.moveSpeed * settings.moveSpeedRange.y + settings.moveSpeedRange.x;
     float turnSpeed = s.turnSpeed * settings.turnSpeedRange.y + settings.turnSpeedRange.x;
+    float intentionalTurnWeight = s.intentionalTurnWeight * settings.intentionalTurnRange.y + settings.intentionalTurnRange.x;
+    float randomTurnWeight = s.randomTurnWeight * settings.randomTurnRange.y + settings.randomTurnRange.x;
     
+    //get ready to sample trail texture to find members of own species
     float2 centerSensorPos = getOffset(a.angle, sensorDistance) + a.position;
     float2 leftSensorPos = getOffset(a.angle + sensorAngle, sensorDistance) + a.position;
     float2 rightSensorPos = getOffset(a.angle - sensorAngle, sensorDistance) + a.position;
     
+    //sample trail texture at three points
     float4 centerSensorOutput = sensorSample(centerSensorPos, sensorSize);
     float centerValue = dot(centerSensorOutput * s.color, float4(1, 1, 1, 1)) - dot(centerSensorOutput * s.inverseColor, float4(1,1,1,1))/2;
     float4 leftSensorOutput = sensorSample(leftSensorPos, sensorSize);
     float leftValue = dot(leftSensorOutput * s.color, float4(1, 1, 1, 1)) - dot(leftSensorOutput * s.inverseColor, float4(1, 1, 1, 1))/2;
     float4 rightSensorOutput = sensorSample(rightSensorPos, sensorSize);
     float rightValue = dot(rightSensorOutput * s.color, float4(1, 1, 1, 1)) - dot(rightSensorOutput * s.inverseColor, float4(1, 1, 1, 1))/2;
-    uint seed = (uint) id.x + a.position.x + a.position.y + time;
+    
+    //decide which way to turn based on samples
+    uint seed = (uint) id.x + a.position.x + a.position.y + time;    
     if (leftValue >= centerValue && leftValue > rightValue)
     {
-        a.angle += turnSpeed * deltaTime * Random(seed) * 3;
+        a.angle += turnSpeed * deltaTime * Random(seed) * intentionalTurnWeight;
     }
     else if (rightValue >= centerValue && rightValue > leftValue)
     {
-        a.angle -= turnSpeed * deltaTime * Random(seed) * 3;
+        a.angle -= turnSpeed * deltaTime * Random(seed) * intentionalTurnWeight;
     }
     else
     {
-        a.angle += (Random(seed) - 0.5) * 0.5 * turnSpeed * deltaTime;
+        //Random is between 0 and 1, so remove a half and double to get -1 to 1
+        a.angle += (Random(seed) - 0.5) * 2 * randomTurnWeight * turnSpeed * deltaTime;
     }
     
+    //update position based on speed and angle
     float2 movement = getOffset(a.angle, moveSpeed * deltaTime);
-
     a.position = a.position + movement;
-
-    /* bounce off edges
-    if (a.position.x > resolution || a.position.x < 0)
-    {
-        a.angle = acos(-(normalize(movement).x));
-    }
-    if (a.position.y > resolution || a.position.y < 0)
-    {
-        a.angle = -a.angle;
-    }
-    */
     
+    //keep position within texture bounds
     if (a.position.x > resolution || a.position.x < 0 || a.position.y > resolution || a.position.y < 0)
     {
         a.angle = (Random(seed + id.x + time)) * 360;
     }
     
+    //calculate force keeping Actors within a circle
     float2 center = float2(resolution / 2., resolution / 2.);
     float radiusSquared = (resolution / 2) * (resolution / 2);
     float distanceSquaredFromCenter = dot(a.position - center, a.position - center);
@@ -216,16 +206,16 @@ void UpdateActor (uint3 id : SV_DispatchThreadID)
     a.angle += (turnBackWeight * turnBackDirection * turnBackDistance) * turnSpeed * deltaTime;
     
     
-    
-
+    //final clamp of position just in case
     a.position = clamp(a.position, float2(0, 0), float2(resolution, resolution));
     int2 texturePosition = int2(floor(a.position.x), floor(a.position.y));
     
+    //return actor info to the buffer
     actors[id.x] = a;
-
+       
+    //write actor color to the trail texture
     _trailTexToWrite[texturePosition] += s.color;
-    _trailTexToWrite2[texturePosition] += s.color;
-    
+    _trailTexToWrite2[texturePosition] += s.color; 
 }
 
 [numthreads(8, 8, 1)]
@@ -243,15 +233,18 @@ void UpdateTrailsHorizontal (uint3 id : SV_DispatchThreadID)
     };
     
     float4 sum = float4(0, 0, 0, 0);
+    float maxValue = 0;
     
+    //sum adjacent pixels, weighted by the kernel
     for (int x = 0; x < 7; x++)
     {
+        maxValue += otherKernel[x];
         float2 uv = float2(id.x + 0.5 + (x - 3), id.y + 0.5) / (float) resolution;
         sum += (_trailTexToSample.SampleLevel(sampler_trailTexToSample, uv, 0)) * otherKernel[x];
     }
     
-    float4 col = sum / 4.422;
-    //col.g = _trailTexToWrite[id.xy].g;
+    //divide by the maximum potential value to get the average
+    float4 col = sum / maxValue;
     
     _trailTexToWrite[id.xy] = col;
 }
@@ -271,35 +264,27 @@ void UpdateTrailsVertical(uint3 id : SV_DispatchThreadID)
     };
     
     float4 sum = float4(0, 0, 0, 0);
+    float maxValue = 0;
     
+    //sum adjacent pixels weighted by the kernel
     for (int y = 0; y < 7; y++)
     {
+        maxValue += otherKernel[y];
         float2 uv = float2(id.x + 0.5, id.y + (y - 3) + 0.5) / (float) resolution;
         sum += (_trailTexToSample.SampleLevel(sampler_trailTexToSample, uv, 0)) * otherKernel[y];
     }
     
-    float4 col = sum / 4.422;
+    //divide by the maximum potential value to get the average
+    float4 col = sum / maxValue;
     
+    
+    //this pass is called second so it also handles the evaporation
     col -= ((1. / evaporateSpeed) * deltaTime);
     
+    //set alpha back to 1
     col.a = 1.;
     
-    //col.g = _trailTexToWrite[id.xy].g;
     _trailTexToWrite[id.xy] = col;
-}
-
-[numthreads(8,8,1)]
-void DrawFieldBoundary(uint3 id : SV_DispatchThreadID)
-{
-    float2 center = float2(resolution / 2., resolution / 2.);
-    float radiusSquared = (resolution / 2) * (resolution / 2);
-    float distanceSquaredFromCenter = dot(id.xy - center, id.xy - center);
-    
-    float4 color = float4(0, max(distanceSquaredFromCenter - radiusSquared, 0), 0, 1);
-    color = saturate(color);
-    
-    _trailTexToWrite[id.xy] = color;
-    _trailTexToWrite2[id.xy] = color;
 }
 
 

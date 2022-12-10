@@ -41,12 +41,21 @@ public class Slime : MonoBehaviour
 
     [SerializeField]
     [Range(0f, 45f)]
-    private float sensorAngleMin,
+    private float 
+        sensorAngleMin,
         sensorAngleMax,
         sensorDistanceMin,
         sensorDistanceMax,
         turnSpeedMin,
         turnSpeedMax;
+
+    [SerializeField]
+    [Range(0f, 5f)]
+    private float
+        intentionalTurnWeightMin,
+        intentionalTurnWeightMax,
+        randomTurnWeightMin,
+        randomTurnWeightMax;
 
     [SerializeField]
     [Range(0f, 1f)]
@@ -80,7 +89,7 @@ public class Slime : MonoBehaviour
             computeShader.SetFloat("time", Time.time);
 
             //run main sim
-            computeShader.Dispatch(0, numActors / 16, 1, 1);
+            computeShader.Dispatch(0, numActors / 64, 1, 1);
 
             //blur the trail texture in two passes
             computeShader.Dispatch(1, resolution / 8, resolution / 8, 1);
@@ -118,11 +127,11 @@ public class Slime : MonoBehaviour
         actors = createActorsCircle(0.5f);
         actorBuffer.SetData(actors);
 
-        speciesBuffer = new ComputeBuffer(numSpecies, sizeof(int) * 2 + sizeof(float) * 12);
+        speciesBuffer = new ComputeBuffer(numSpecies, sizeof(int) * 2 + sizeof(float) * 14);
         species = createSpecies();
         speciesBuffer.SetData(species);
 
-        settingsBuffer = new ComputeBuffer(1, sizeof(float) * 11);
+        settingsBuffer = new ComputeBuffer(1, sizeof(float) * 15);
         UpdateSettings();
 
         //pass textures to compute shader
@@ -135,9 +144,6 @@ public class Slime : MonoBehaviour
 
         computeShader.SetTexture(2, "_trailTexToWrite", trailTexture2);
         computeShader.SetTexture(2, "_trailTexToSample", trailTexture);
-
-        computeShader.SetTexture(3, "_trailTexToWrite", trailTexture);
-        computeShader.SetTexture(3, "_trailTexToWrite2", trailTexture2);
 
         //pass parameters and buffers to shader
         computeShader.SetInt("resolution", resolution);
@@ -175,11 +181,15 @@ public class Slime : MonoBehaviour
     {
         Settings newSettings = new Settings(
             new Vector2[] {
-                new Vector2(sensorSizeMin, sensorSizeMax),
-                new Vector2(sensorAngleMin, sensorAngleMax),
-                new Vector2(sensorDistanceMin, sensorDistanceMax),
-                new Vector2(moveSpeedMin, moveSpeedMax),
-                new Vector2(turnSpeedMin, turnSpeedMax)
+                //each Vector2's x value is the minimum possible value
+                //each Vector2's y value is the range of values available
+                new Vector2(sensorSizeMin, sensorSizeMax - sensorSizeMin),
+                new Vector2(sensorAngleMin, sensorAngleMax - sensorSizeMin),
+                new Vector2(sensorDistanceMin, sensorDistanceMax - sensorDistanceMin),
+                new Vector2(moveSpeedMin, moveSpeedMax - moveSpeedMin),
+                new Vector2(turnSpeedMin, turnSpeedMax - turnSpeedMin),
+                new Vector2(intentionalTurnWeightMin, intentionalTurnWeightMax - intentionalTurnWeightMin),
+                new Vector2(randomTurnWeightMin, randomTurnWeightMax - randomTurnWeightMin)
             },
             new float[]
             {
@@ -211,6 +221,8 @@ public class Slime : MonoBehaviour
                 _sensorDistance: UnityEngine.Random.value,
                 _moveSpeed: UnityEngine.Random.value,
                 _turnSpeed: UnityEngine.Random.value,
+                _intentionalTurnWeight: UnityEngine.Random.value,
+                _randomTurnWeight: UnityEngine.Random.value,
                 _color: color,
                 _inverseColor: inverseColor);
 
@@ -277,6 +289,8 @@ public struct Settings
         sensorDistanceRange = ranges[2];
         moveSpeedRange = ranges[3];
         turnSpeedRange = ranges[4];
+        intentionalTurnRange = ranges[5];
+        randomTurnRange = ranges[6];
 
         angleAdjustmentWeight = weights[0];
     }
@@ -286,6 +300,8 @@ public struct Settings
     public Vector2 sensorDistanceRange;
     public Vector2 moveSpeedRange;
     public Vector2 turnSpeedRange;
+    public Vector2 intentionalTurnRange;
+    public Vector2 randomTurnRange;
 
     public float angleAdjustmentWeight;
 }
@@ -299,6 +315,8 @@ public struct Species
         float _sensorDistance,
         float _moveSpeed,
         float _turnSpeed,
+        float _intentionalTurnWeight,
+        float _randomTurnWeight,
         Vector4 _color,
         Vector4 _inverseColor)
     {
@@ -308,6 +326,8 @@ public struct Species
         sensorDistance = _sensorDistance;
         moveSpeed = _moveSpeed;
         turnSpeed = _turnSpeed;
+        intentionalTurnWeight= _intentionalTurnWeight;
+        randomTurnWeight = _randomTurnWeight;
         color = _color;
         inverseColor = _inverseColor;
     }
@@ -318,6 +338,8 @@ public struct Species
     public float sensorDistance;
     public float moveSpeed;
     public float turnSpeed;
+    public float intentionalTurnWeight;
+    public float randomTurnWeight;
     public Vector4 color;
     public Vector4 inverseColor;
 }
