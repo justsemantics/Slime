@@ -18,6 +18,7 @@ struct Species
     float sensorAngle;
     float sensorDistance;
     float moveSpeed;
+    float flowSpeed;
     float turnSpeed;
     float intentionalTurnWeight;
     float randomTurnWeight;
@@ -31,6 +32,7 @@ struct Settings
     float2 sensorAngleRange;
     float2 sensorDistanceRange;
     float2 moveSpeedRange;
+    float2 flowSpeedRange;
     float2 turnSpeedRange;
     float2 intentionalTurnRange;
     float2 randomTurnRange;
@@ -53,6 +55,9 @@ StructuredBuffer<Settings> settingsBuffer;
 RWTexture2D<float4> _drawTex;
 RWTexture2D<float4> _trailTexToWrite;
 RWTexture2D<float4> _trailTexToWrite2;
+
+Texture2D _flowTexture;
+SamplerState sampler_flowTexture;
 
 Texture2D _angleAdjustmentTexture;
 SamplerState sampler_angleAdjustmentTexture;
@@ -139,8 +144,11 @@ void UpdateActor (uint3 id : SV_DispatchThreadID)
     Species s = species[a.species];
     Settings settings = settingsBuffer[0];
     
-    //calculate adjustment to angle from texture
+    //initialize texture lookup based parameters
     float2 uv = a.position / resolution;
+    
+    float4 flowSample = _flowTexture.SampleLevel(sampler_flowTexture, uv, 0);
+    
     float4 angleAdjustment = _angleAdjustmentTexture.SampleLevel(sampler_angleAdjustmentTexture, uv, 0);
     float angleAdjustmentWeight = settings.angleAdjustmentWeight;
     
@@ -149,6 +157,7 @@ void UpdateActor (uint3 id : SV_DispatchThreadID)
     float sensorAngle = (s.sensorAngle + (angleAdjustment - 0.5) * angleAdjustmentWeight) * settings.sensorAngleRange.y + settings.sensorAngleRange.x;
     float sensorDistance = s.sensorDistance * settings.sensorDistanceRange.y + settings.sensorDistanceRange.x;
     float moveSpeed = s.moveSpeed * settings.moveSpeedRange.y + settings.moveSpeedRange.x;
+    float flowSpeed = s.flowSpeed * settings.flowSpeedRange.y + settings.flowSpeedRange.x;
     float turnSpeed = s.turnSpeed * settings.turnSpeedRange.y + settings.turnSpeedRange.x;
     float intentionalTurnWeight = s.intentionalTurnWeight * settings.intentionalTurnRange.y + settings.intentionalTurnRange.x;
     float randomTurnWeight = s.randomTurnWeight * settings.randomTurnRange.y + settings.randomTurnRange.x;
@@ -182,9 +191,10 @@ void UpdateActor (uint3 id : SV_DispatchThreadID)
         a.angle += (Random(seed) - 0.5) * 2 * randomTurnWeight * turnSpeed * deltaTime;
     }
     
-    //update position based on speed and angle
+    //update position
     float2 movement = getOffset(a.angle, moveSpeed * deltaTime);
-    a.position = a.position + movement;
+    float2 flow = normalize(flowSample.xy - 0.5) * flowSpeed * deltaTime;
+    a.position = a.position + movement + flow;
     
     //keep position within texture bounds
     if (a.position.x > resolution || a.position.x < 0 || a.position.y > resolution || a.position.y < 0)
